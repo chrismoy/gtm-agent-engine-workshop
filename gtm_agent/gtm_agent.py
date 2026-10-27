@@ -14,7 +14,7 @@ Install:
     uv add deepagents langchain langgraph langchain-openai langsmith python-dotenv
 """
 
-import json
+import math
 import os
 import random
 import uuid
@@ -67,22 +67,14 @@ def build_prospect_profile(prospect_id: str) -> dict:
     return {"prospect_profile": built, "found": True}
 
 
-SCORING_PROMPT = (
-    "You are a GTM assistant. Score the prospect's potential for the offering from "
-    "1 to 100 based on how good a fit they are, weighing their annual revenue and "
-    "tech stack. In your justification, explicitly list which of the offering's required "
-    "technologies the prospect has and which required technologies they are missing, naming "
-    "each one. Any missing required technology must lower the tech_stack_match component and "
-    "the overall score. Return a score and a justification that reflects your "
-    "overall assessment of this prospect's potential."
-)
+REVENUE_FIT_WEIGHT = 0.5
+TECH_STACK_MATCH_WEIGHT = 0.5
 
 from typing import Literal
 
 class RubricBreakdown(BaseModel):
     revenue_fit: float
     tech_stack_match: float
-    segment_fit: float
     component_max: Literal[100] = 100
 
 
@@ -93,9 +85,6 @@ class ProspectScore(BaseModel):
     rubric_breakdown: RubricBreakdown
 
 
-_scoring_llm = ChatOpenAI(model=MODEL_NAME, temperature=0).with_structured_output(ProspectScore)
-
-
 def _offering_has_required_fields(offering):
     "Return True if the offering has the fields needed to score against it."
     return bool(offering) and bool(offering.get("required_tech_stack")) and \
@@ -104,22 +93,43 @@ def _offering_has_required_fields(offering):
 
 @tool
 def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict:
-    "Score a prospect profile's potential for an offering on a 1-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
+    "Score a prospect profile's potential for an offering on a 0-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
     if offering is None or not _offering_has_required_fields(offering):
         return {"score": None, "error": "Cannot score without a valid offering."}
     # Score against the prospect's saved tech stack of record.
     pid = prospect_profile.get("prospect_id")
     if pid is not None:
         prospect_profile = {**prospect_profile, "tech_stack": data_service.fetch_tech_stack(pid)}
-    user = (
-        "Offering:\n" + json.dumps(offering, indent=2) +
-        "\n\nProspect profile:\n" + json.dumps(prospect_profile, indent=2)
-    )
-    result = _scoring_llm.invoke([
-        {"role": "system", "content": SCORING_PROMPT},
-        {"role": "user", "content": user},
-    ])
-    return result.model_dump()
+    required = offering["required_tech_stack"]
+    tech_stack = prospect_profile.get("tech_stack")
+    minimum = offering["min_annual_revenue"]
+    revenue = prospect_profile.get("annual_revenue")
+    if not isinstance(required, list) or not all(isinstance(tech, str) for tech in required):
+        return {"score": None, "error": "Required technologies must be a nonempty list of names."}
+    if not isinstance(tech_stack, list) or not all(isinstance(tech, str) for tech in tech_stack):
+        return {"score": None, "error": "Prospect tech stack must be a list of names."}
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or
+           not math.isfinite(value) for value in (minimum, revenue)) or minimum <= 0 or revenue < 0:
+        return {"score": None, "error": "Scoring requires a positive minimum revenue and nonnegative annual revenue."}
+    required = list(dict.fromkeys(required))
+    have = [tech for tech in required if tech in tech_stack]
+    missing = [tech for tech in required if tech not in tech_stack]
+    tech_stack_match = 100 * len(have) / len(required)
+    revenue_fit = 100 * min(revenue / minimum, 1)
+    score = round(REVENUE_FIT_WEIGHT * revenue_fit + TECH_STACK_MATCH_WEIGHT * tech_stack_match)
+    return ProspectScore(
+        score=score,
+        justification=(
+            f"Annual revenue: {revenue}; minimum annual revenue: {minimum}; "
+            f"revenue fit: {revenue_fit:g}/100. "
+            f"Required technologies present: {', '.join(have) or 'none'}. "
+            f"Required technologies missing: {', '.join(missing) or 'none'}. "
+            f"Technology coverage: {tech_stack_match:g}/100."
+        ),
+        rubric_breakdown=RubricBreakdown(
+            revenue_fit=revenue_fit, tech_stack_match=tech_stack_match,
+        ),
+    ).model_dump()
 
 
 @tool
