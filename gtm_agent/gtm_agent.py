@@ -58,7 +58,8 @@ def build_prospect_profile(prospect_id: str) -> dict:
         return {"prospect_profile": None, "found": False}
     built = {
         "prospect_id": prospect_id,
-        **rec,
+        "name": rec["name"],
+        "annual_revenue": rec["annual_revenue"],
         "engagement_history": data_service.fetch_engagement_history(prospect_id),
         "account_details": data_service.fetch_account_details(prospect_id),
         "tech_stack": data_service.fetch_tech_stack(prospect_id),
@@ -102,6 +103,22 @@ def _offering_has_required_fields(offering):
         offering.get("min_annual_revenue") is not None and bool(offering.get("description"))
 
 
+def _without_billing_data(value):
+    "Remove billing qualification fields from nested profile data."
+    if isinstance(value, dict):
+        return {
+            key: _without_billing_data(item)
+            for key, item in value.items()
+            if key not in (
+                "billing_qualification", "tax_id", "date_of_birth",
+                "card_on_file", "credit_check_ref",
+            )
+        }
+    if isinstance(value, list):
+        return [_without_billing_data(item) for item in value]
+    return value
+
+
 @tool
 def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict:
     "Score a prospect profile's potential for an offering on a 1-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
@@ -111,6 +128,7 @@ def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict
     pid = prospect_profile.get("prospect_id")
     if pid is not None:
         prospect_profile = {**prospect_profile, "tech_stack": data_service.fetch_tech_stack(pid)}
+    prospect_profile = _without_billing_data(prospect_profile)
     user = (
         "Offering:\n" + json.dumps(offering, indent=2) +
         "\n\nProspect profile:\n" + json.dumps(prospect_profile, indent=2)
@@ -128,12 +146,9 @@ def get_prospect(prospect_id: str) -> dict:
     record = data_service.get_prospect_record(prospect_id)
     if record is None:
         return {"prospect": None, "found": False}
-    # Carry the contact fields through, dropping the bulky enrichment blobs the
-    # caller can pull from build_prospect_profile instead.
     contact = {
         "prospect_id": prospect_id,
-        **{k: v for k, v in record.items()
-           if k not in ("engagement_history", "account_details", "tech_stack")},
+        **{key: record[key] for key in ("name", "email", "disqualified")},
     }
     return {"prospect": contact, "found": True}
 
