@@ -137,6 +137,19 @@ behave as written.
 `run_agent(user_message, *, user_id=None, environment="production", thread_id=None)`
 and a `gtm_agent` graph, if you'd rather drive it yourself.)
 
+Prospect scoring uses only annual revenue and the saved technology stack. Revenue fit is
+`100 * min(annual_revenue / min_annual_revenue, 1)` and technology fit is the percentage of
+required technologies present. The overall score is Python's `round(0.5 * revenue_fit +
+0.5 * tech_stack_match)` (nearest integer, ties to even), using `REVENUE_FIT_WEIGHT = 0.5` and
+`TECH_STACK_MATCH_WEIGHT = 0.5`, positive weights that sum to one. Scores range from 0 to 100; segment fit is not scored. An empty required
+technology list or a missing/nonpositive minimum revenue returns a scoring error.
+
+Run the local scoring tests without model or LangSmith calls:
+
+```bash
+LANGSMITH_TRACING=false OPENAI_API_KEY=test uv run python -m unittest gtm_agent.test_scoring
+```
+
 ---
 
 # The loop: Build → Test → Deploy → Monitor
